@@ -1,0 +1,20 @@
+.DS_Store
+*.o
+*.d
+*.gcda
+*.gcno
+*.gcov
+
+# Local build products
+KAT_KEM
+**/test/test_mul
+**/test/test_cpapke
+**/test/test_kem
+**/test/test_speed
+**/test/test_ntt_avx
+PQCkemKAT_*.req
+PQCkemKAT_*.rsp
+**/output/
+
+# Local review material; public corrections are recorded in ERRATA.md.
+/issue/
