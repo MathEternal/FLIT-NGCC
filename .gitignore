@@ -16,5 +16,5 @@ PQCkemKAT_*.req
 PQCkemKAT_*.rsp
 **/output/
 
-# Local review material; public corrections are recorded in ERRATA.md.
+# Local review material; public corrections are recorded in README.md.
 /issue/
