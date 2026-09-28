@@ -59,7 +59,7 @@ the parameter sets implemented by the source code.
 The complete KEM secret-key sizes in Table 11 should be:
 
 | Parameter set | Correct size (bytes) | Implemented formula |
-|---|---:|---|
+|:---:|:---:|:---:|
 | FLIT128 | 1351 | `640 + 32 + 615 + 64` |
 | FLIT256 | 2605 | `1280 + 32 + 1229 + 64` |
 | FLIT512 | 6336 | `3072 + 64 + 3072 + 128` |
