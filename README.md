@@ -40,13 +40,6 @@ listed parameter set. The canonical published vectors are in `Test_Vectors/`;
 per-implementation `output/` directories are generated locally and are not
 tracked.
 
-| Variant | SHA-256 |
-|---|---|
-| FLIT128 | `a772deebcc67af946d60d9ebab8014318879617de619692bd59650196b578e69` |
-| FLIT256 | `0788e13e3a0c0ff0c8ada4defab0ea4213bf7980bcb6099dba1a2e35b05ea618` |
-| FLIT512 | `e4019117230dc2ef5983e8c2c252f08189e8004e3b7db595a66eec3aa8d9820c` |
-| FLIT-FIPS202-128 | `dbbe814ecbb2954adb09ef7d9bef30da281c6e7a18828d3cdba423f262dd` |
-| FLIT-FIPS202-256 | `58792b5969c2e79ef899f91bb912e21d02c6b0b6aeaf1afefcb6948d6da39333` |
 
 ## Specification corrections
 
