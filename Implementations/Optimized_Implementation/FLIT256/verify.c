@@ -35,7 +35,8 @@ int verify(const uint8_t *a, const uint8_t *b, size_t len)
     for (; i < len; i++)
         r |= a[i] ^ b[i];
 
-    return (-(int64_t)r) >> 63;
+    /* Full-width unsigned nonzero test; cmov requires a condition in {0,1}. */
+    return (int)((r | (UINT64_C(0) - r)) >> 63);
 }
 
 /*************************************************
