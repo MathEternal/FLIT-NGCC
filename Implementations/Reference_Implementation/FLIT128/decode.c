@@ -15,11 +15,33 @@ typedef struct {
     uint64_t w[F1_NWORDS];
 } poly_f1_u64;
 
+/*************************************************
+* Name:        f1u64_getbit
+*
+* Description: Extract one coefficient from a bit-packed polynomial over F2
+*
+* Arguments:   - const poly_f1_u64 *p: pointer to input polynomial
+*              - int i: coefficient index in the range [0, F1_N)
+*
+* Returns:     coefficient i of p, either 0 or 1
+**************************************************/
 static inline int f1u64_getbit(const poly_f1_u64 *p, int i)
 {
     return (int)((p->w[i >> 6] >> (i & 63)) & 1);
 }
 
+/*************************************************
+* Name:        f1u64_eval_one
+*
+* Description: Evaluate a at X = 1 over F2 by computing the parity of all
+*              coefficients. Since F1_N is a power of two,
+*              X^F1_N + 1 = (X + 1)^F1_N over F2, so a is invertible in
+*              F2[X]/(X^F1_N + 1) exactly when a(1) is 1.
+*
+* Arguments:   - const poly_f1_u64 *a: pointer to input polynomial
+*
+* Returns:     a(1), either 0 or 1
+**************************************************/
 static int f1u64_eval_one(const poly_f1_u64 *a)
 {
     uint64_t v = 0;
@@ -31,6 +53,15 @@ static int f1u64_eval_one(const poly_f1_u64 *a)
     return (int)(v & 1);
 }
 
+/*************************************************
+* Name:        f1u64_translate
+*
+* Description: Apply the binary Taylor shift f(X) -> f(X + 1) in place.
+*              This involution changes variables between arithmetic modulo
+*              X^F1_N + 1 = (X + 1)^F1_N and arithmetic modulo X^F1_N.
+*
+* Arguments:   - poly_f1_u64 *f: pointer to input/output polynomial
+**************************************************/
 static void f1u64_translate(poly_f1_u64 *f)
 {
     int s, w, ws, i, j;
@@ -48,6 +79,17 @@ static void f1u64_translate(poly_f1_u64 *f)
     }
 }
 
+/*************************************************
+* Name:        spread32
+*
+* Description: Insert one zero bit after every bit of x. This maps the
+*              coefficient of X^i to X^(2i), thereby squaring a degree-<32
+*              polynomial over F2.
+*
+* Arguments:   - uint32_t x: packed input coefficients
+*
+* Returns:     packed 64-bit polynomial with input bit i at output bit 2i
+**************************************************/
 static uint64_t spread32(uint32_t x)
 {
     uint64_t v = x;
@@ -59,6 +101,19 @@ static uint64_t spread32(uint32_t x)
     return v;
 }
 
+/*************************************************
+* Name:        f1u64_square_trunc
+*
+* Description: Square a polynomial over F2 using its first prec valid
+*              coefficients and retain terms of degree below trunc. The
+*              truncation length must be even, as in all current callers.
+*
+* Arguments:   - poly_f1_u64 *r:       pointer to output polynomial
+*              - const poly_f1_u64 *a: pointer to input polynomial
+*              - int prec:             number of valid low coefficients in a
+*              - int trunc:            even number of low output coefficients
+*                                      to retain
+**************************************************/
 static void f1u64_square_trunc(poly_f1_u64 *r, const poly_f1_u64 *a,
                                 int prec, int trunc)
 {
@@ -80,6 +135,18 @@ static void f1u64_square_trunc(poly_f1_u64 *r, const poly_f1_u64 *a,
     }
 }
 
+/*************************************************
+* Name:        f1u64_mul_trunc
+*
+* Description: Multiply a and b over F2 and retain terms of degree below
+*              trunc, equivalently computing a*b modulo X^trunc
+*
+* Arguments:   - poly_f1_u64 *r:       pointer to output polynomial
+*              - const poly_f1_u64 *a: pointer to first input polynomial
+*              - const poly_f1_u64 *b: pointer to second input polynomial
+*              - int trunc:            number of low output coefficients to
+*                                      retain
+**************************************************/
 static void f1u64_mul_trunc(poly_f1_u64 *r, const poly_f1_u64 *a,
                              const poly_f1_u64 *b, int trunc)
 {
@@ -112,6 +179,17 @@ static void f1u64_mul_trunc(poly_f1_u64 *r, const poly_f1_u64 *a,
     *r = tmp;
 }
 
+/*************************************************
+* Name:        f1u64_newton_inv
+*
+* Description: Compute the inverse of fhat modulo X^F1_N by precision
+*              doubling. The input must have constant coefficient 1.
+*              In characteristic two, each iteration refines the inverse
+*              with g <- fhat*g^2 modulo the new precision.
+*
+* Arguments:   - poly_f1_u64 *g:          pointer to output inverse
+*              - const poly_f1_u64 *fhat: pointer to input polynomial
+**************************************************/
 static void f1u64_newton_inv(poly_f1_u64 *g, const poly_f1_u64 *fhat)
 {
     poly_f1_u64 gsq;
@@ -132,6 +210,15 @@ static void f1u64_newton_inv(poly_f1_u64 *g, const poly_f1_u64 *fhat)
     }
 }
 
+/*************************************************
+* Name:        f1_pack
+*
+* Description: Pack the low bit of each int16_t coefficient into a
+*              bit-packed polynomial over F2
+*
+* Arguments:   - poly_f1_u64 *dst:  pointer to output packed polynomial
+*              - const poly_f1 *src: pointer to input coefficient polynomial
+**************************************************/
 static void f1_pack(poly_f1_u64 *dst, const poly_f1 *src)
 {
     unsigned int i;
@@ -142,6 +229,15 @@ static void f1_pack(poly_f1_u64 *dst, const poly_f1 *src)
     }
 }
 
+/*************************************************
+* Name:        f1_unpack
+*
+* Description: Unpack a bit-packed polynomial into int16_t coefficients,
+*              writing each coefficient as either 0 or 1
+*
+* Arguments:   - poly_f1 *dst:       pointer to output coefficient polynomial
+*              - const poly_f1_u64 *src: pointer to input packed polynomial
+**************************************************/
 static void f1_unpack(poly_f1 *dst, const poly_f1_u64 *src)
 {
     unsigned int i;
@@ -152,12 +248,14 @@ static void f1_unpack(poly_f1 *dst, const poly_f1_u64 *src)
 /*************************************************
 * Name:        poly_inv_in_F2
 *
-* Description: Compute inverse of a polynomial in F₂[x]/(x^n+1)
-*              If f is not invertible, return 0 and leave r unchanged;
-*              otherwise return 1 and write inverse to r.
-* 
-* Arguments:   - poly *r: pointer to output polynomial (inverse of f)
-*              - const poly *f: pointer to input polynomial
+* Description: Fold f modulo 2 into F2[X]/(X^F1_N + 1) and compute the
+*              inverse of the folded polynomial. On failure, f1 contains
+*              the folded polynomial rather than a valid inverse.
+*
+* Arguments:   - poly_f1 *f1: pointer to output/scratch polynomial
+*              - const poly *f: pointer to input coefficient polynomial
+*
+* Returns:     1 if the folded polynomial is invertible, otherwise 0
 **************************************************/
 int poly_inv_in_F2(poly_f1 *f1, const poly *f)
 {
@@ -185,6 +283,17 @@ int poly_inv_in_F2(poly_f1 *f1, const poly *f)
     return 1;
 }
 
+/*************************************************
+* Name:        f1u64_mul_ring
+*
+* Description: Multiply two bit-packed polynomials in
+*              F2[X]/(X^F1_N + 1). The upper half of the carry-less product
+*              is folded into the lower half with XOR.
+*
+* Arguments:   - poly_f1_u64 *r:       pointer to output polynomial
+*              - const poly_f1_u64 *a: pointer to first input polynomial
+*              - const poly_f1_u64 *b: pointer to second input polynomial
+**************************************************/
 static void f1u64_mul_ring(poly_f1_u64 *r,
                            const poly_f1_u64 *a,
                            const poly_f1_u64 *b)
@@ -231,12 +340,20 @@ static void f1u64_mul_ring(poly_f1_u64 *r,
 /*************************************************
 * Name:        poly_decode_to_msg
 *
-* Description: Decode ciphertext polynomial c to message, using secret polynomial f1.
-*           Message is 0/1 depending on whether corresponding coefficient of c·f1 is closer to 0 or to q/2.
+* Description: Decode a coefficient-domain decryption polynomial into a
+*              message. The routine subtracts HALF_Q and reduces c to
+*              centered representatives in place, applies the D2 threshold
+*              for KEM_MODE 128 or the D4 threshold for KEM_MODE 256/512,
+*              and multiplies the recovered binary polynomial by the
+*              precomputed inverse f1.
 *
-* Arguments:   - uint8_t msg[]: output message byte array (of KEM_MSGBYTES bytes)
-*              - poly *c: pointer to input ciphertext polynomial
-*              - poly_f1 *f1: pointer to input secret polynomial f1
+* Arguments:   - uint8_t msg[]: output message byte array of
+*                               KEM_MSGBYTES bytes
+*              - poly *c: pointer to input/scratch decryption polynomial;
+*                         each coefficient is replaced by the centered
+*                         representative of c[i] - HALF_Q modulo Q
+*              - poly_f1 *f1: pointer to the precomputed inverse of the
+*                             folded secret polynomial over F2
 **************************************************/
 void poly_decode_to_msg(uint8_t msg[KEM_MSGBYTES], poly *c, poly_f1 *f1) {
 #if KEM_MODE == 128

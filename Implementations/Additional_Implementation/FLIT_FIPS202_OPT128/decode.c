@@ -58,9 +58,9 @@ static int f1u64_eval_one(const poly_f1_u64 *a)
 /*************************************************
 * Name:        f1u64_translate
 *
-* Description: Apply f(X) -> f(X+1) mod (X^n+1) over F2.
-*              This is an involution (applying it twice recovers
-*              the original), so it also serves as the inverse.
+* Description: Apply the binary Taylor shift f(X) -> f(X + 1) in place.
+*              This involution changes variables between arithmetic modulo
+*              X^F1_N + 1 = (X + 1)^F1_N and arithmetic modulo X^F1_N.
 *              Implemented as a constant-time butterfly network:
 *              - s < 64:  bit-parallel shift + mask within each word
 *              - s >= 64: word-block XOR
@@ -105,12 +105,13 @@ static inline uint64_t sq2_64(uint32_t x)
 * Description: Compute a^2 in F2[X], keeping only the first trunc terms.
 *              Uses BMI2 pdep to insert a 0 after each coefficient.
 *              Processes 64-bit input words; each word expands to two
-*              output words (bits at even positions).
+*              output words (bits at even positions). The truncation length
+*              must be even, as in all current callers.
 *
 * Arguments:   - poly_f1_u64 *r:    output polynomial (mod X^trunc)
 *              - const poly_f1_u64 *a: input polynomial
 *              - int prec:           number of valid bits in a
-*              - int trunc:          number of terms to keep
+*              - int trunc:          even number of terms to keep
 **************************************************/
 static void f1u64_square_trunc(poly_f1_u64 *r, const poly_f1_u64 *a,
                                 int prec, int trunc)
@@ -217,12 +218,13 @@ static void f1u64_newton_inv(poly_f1_u64 *g, const poly_f1_u64 *fhat)
 /*************************************************
 * Name:        f1_pack
 *
-* Description: Pack f1 from a uint8_t array into a 64-bit word array.
-*              Each coefficient contributes only its lowest bit,
-*              achieving a 16x space reduction.
+* Description: Pack an unpacked uint8_t polynomial into 64-bit words.
+*              Each coefficient is expected to be 0 or 1; a set output bit
+*              is produced exactly when the corresponding byte equals 1,
+*              achieving an 8x space reduction.
 *
-* Arguments:   - poly_f1_u64 *dst:  pointer to output bit-packed polynomial
-*              - const poly_f1 *src: pointer to input uint8_t polynomial
+* Arguments:   - poly_f1_u64 *b: pointer to output bit-packed polynomial
+*              - const poly_f1 *a: pointer to input uint8_t polynomial
 **************************************************/
 static void f1_pack(poly_f1_u64 *b, const poly_f1 *a)
 {
@@ -247,8 +249,8 @@ static void f1_pack(poly_f1_u64 *b, const poly_f1 *a)
 * Description: Unpack a 64-bit word array back into a uint8_t array.
 *              Each coefficient is 0 or 1.
 *
-* Arguments:   - poly_f1 *dst:        pointer to output uint8_t polynomial
-*              - const poly_f1_u64 *src: pointer to input bit-packed polynomial
+* Arguments:   - poly_f1 *b: pointer to output uint8_t polynomial
+*              - const poly_f1_u64 *a: pointer to input bit-packed polynomial
 **************************************************/
 static void f1_unpack(poly_f1 *b, const poly_f1_u64 *a)
 {
@@ -263,9 +265,9 @@ static void f1_unpack(poly_f1 *b, const poly_f1_u64 *a)
 /*************************************************
 * Name:        poly_inv_in_F2
 *
-* Description: Compute the inverse of f in F2[x]/(x^n+1).
-*              Returns 0 if f is not invertible (f1 is unchanged),
-*              returns 1 and writes the inverse into f1 if invertible.
+* Description: Fold f modulo 2 into F2[X]/(X^F1_N + 1) and compute the
+*              inverse of the folded polynomial. On failure, f1 contains
+*              the folded polynomial rather than a valid inverse.
 *
 * Algorithm (corresponds to paper Algorithm 2-4):
 *   1. Coefficient folding: use repetition-code structure to fold
@@ -277,8 +279,10 @@ static void f1_unpack(poly_f1 *b, const poly_f1_u64 *a)
 *   4. Newton iteration: compute inverse in F2[[X]]
 *   5. Inverse translate: transform back to inverse of f(X)
 *
-* Arguments:   - poly_f1 *f1: output, inverse of f (also used as scratch buffer)
-*              - const poly *f: input, original polynomial
+* Arguments:   - poly_f1 *f1: pointer to output/scratch polynomial
+*              - const poly *f: pointer to input coefficient polynomial
+*
+* Returns:     1 if the folded polynomial is invertible, otherwise 0
 **************************************************/
 int poly_inv_in_F2(poly_f1 *f1, const poly *f)
 {
@@ -352,9 +356,10 @@ int poly_inv_in_F2(poly_f1 *f1, const poly *f)
 /*************************************************
 * Name:        f1u64_mul_ring
 *
-* Description: Multiply in F2[X]/(X^n+1).  Uses PCLMULQDQ for
+* Description: Multiply in F2[X]/(X^F1_N + 1). Uses PCLMULQDQ for
 *              64x64-bit carry-less word products with schoolbook
-*              accumulation, then folds the upper half modulo X^n+1.
+*              accumulation, then folds the upper half modulo
+*              X^F1_N + 1.
 *
 * Arguments:   - poly_f1_u64 *r:    output polynomial
 *              - const poly_f1_u64 *a: input polynomial a
@@ -388,20 +393,25 @@ static void f1u64_mul_ring(poly_f1_u64 *r,
 /*************************************************
 * Name:        poly_decode_to_msg
 *
-* Description: Decode message from ciphertext polynomial c, using the
-*              secret polynomial f1 (the inverse of f in F2).
+* Description: Decode a coefficient-domain decryption polynomial using the
+*              precomputed inverse f1. The routine subtracts HALF_Q and
+*              reduces c to centered representatives in place.
 *
 * Decoding procedure (corresponds to paper Algorithm 5: Decode):
-*   1. Center ciphertext: shift reference point from (q+1)/2 to 0
+*   1. Subtract HALF_Q and reduce c to centered representatives
 *   2. Block threshold decision: use repetition-code redundancy to make
-*      D2/D4 lattice closest-vector decisions per block of N/n coefficients,
-*      recovering (f*m) in F2[X]/(X^n+1)
-*   3. Multiply by f^{-1}: compute m = (f*m) * f^{-1} in F2[X]/(X^n+1)
+*      D2 decisions for FLIT128 or D4 decisions for FLIT256/512, recovering
+*      (f*m) in F2[X]/(X^F1_N + 1)
+*   3. Multiply by f1 to recover m in F2[X]/(X^F1_N + 1)
 *   4. Extract bytes: pull message bytes from the packed bit representation
 *
-* Arguments:   - uint8_t msg[]: output message byte array
-*              - poly *c: input ciphertext polynomial (in Z_q[X]/(X^N+1))
-*              - poly_f1 *f1: inverse of f in F2[X]/(X^n+1) (precomputed)
+* Arguments:   - uint8_t msg[]: output message byte array of
+*                               KEM_MSGBYTES bytes
+*              - poly *c: pointer to input/scratch decryption polynomial;
+*                         each coefficient is replaced by the centered
+*                         representative of c[i] - HALF_Q modulo Q
+*              - poly_f1 *f1: pointer to the precomputed inverse of the
+*                             folded secret polynomial; not modified
 **************************************************/
 void poly_decode_to_msg(uint8_t msg[KEM_MSGBYTES], poly *c, poly_f1 *f1) {
 #if REPETITIONS == 2
@@ -415,10 +425,10 @@ void poly_decode_to_msg(uint8_t msg[KEM_MSGBYTES], poly *c, poly_f1 *f1) {
     poly_f1_u64 mf1_packed, f1_packed, m_packed;
 
     /*
-     * Step 1: center the ciphertext
-     * Original ciphertext: c = h*r + e + (q+1)/2 * Encode(m)
-     * After subtracting (q+1)/2: coefficients encoding 1 are near 0,
-     * coefficients encoding 0 are near +/- (q+1)/2
+     * Step 1: center the coefficient-domain decryption polynomial
+     * The caller supplies f*ciphertext after the inverse NTT. After
+     * subtracting HALF_Q, coefficients encoding 1 are near 0 and
+     * coefficients encoding 0 are near +/- HALF_Q.
      * poly_sub_halfq centers each coefficient to roughly [-q/2, q/2)
      */
     poly_sub_halfq(c);
@@ -429,15 +439,10 @@ void poly_decode_to_msg(uint8_t msg[KEM_MSGBYTES], poly *c, poly_f1 *f1) {
      *   if |c[i]| + |c[i+256]| < (q-1)/2 = 384 -> decode as 1 (near 0)
      *   otherwise -> decode as 0 (near +/- q/2)
      *
-     * Absolute value trick: (x ^ -(x>>15)) + (x>>15)
-     *   if x >= 0: (x ^ 0) + 0 = x
-     *   if x < 0:  (x ^ -1) + 1 = ~x + 1 = -x (two's complement abs)
-     * This is faster and constant-time compared to branching.
-     *
-     * Comparison trick: (sum - threshold) >> 15
-     *   if sum < threshold -> underflow -> sign bit = 1 -> result = 1
-     *   if sum >= threshold -> non-negative -> sign bit = 0 -> result = 0
-     * Uses unsigned underflow for comparison, avoiding branches.
+     * Absolute value trick: with s = x >> 15, (x ^ s) - s equals x for
+     * nonnegative x and ~x + 1 for negative x. The strict signed comparison
+     * threshold > sum returns 1 exactly when sum < threshold; all values fit
+     * in int16_t.
      */
     {
         const __m256i threshold = _mm256_set1_epi16((int16_t)((Q - 1) / 2));
@@ -450,7 +455,7 @@ void poly_decode_to_msg(uint8_t msg[KEM_MSGBYTES], poly *c, poly_f1 *f1) {
             __m256i u1_lo = _mm256_load_si256((const __m256i *)(c->coeffs + i + N / 2));
             __m256i u1_hi = _mm256_load_si256((const __m256i *)(c->coeffs + i + N / 2 + 16));
 
-            /* abs(x) = (x ^ (x>>15)) + (x>>15) */
+            /* With s = x >> 15, abs(x) = (x ^ s) - s. */
             __m256i s0_lo = _mm256_srai_epi16(u0_lo, 15);
             __m256i s0_hi = _mm256_srai_epi16(u0_hi, 15);
             __m256i s1_lo = _mm256_srai_epi16(u1_lo, 15);
@@ -472,7 +477,7 @@ void poly_decode_to_msg(uint8_t msg[KEM_MSGBYTES], poly *c, poly_f1 *f1) {
             _mm256_storeu_si256((__m256i *)(mf1.coeffs + i), perm);
         }
     }
-    /* At this point mf1 holds (f*m) in F2[X]/(X^n+1) */
+    /* At this point mf1 holds (f*m) in F2[X]/(X^F1_N + 1). */
 
     f1_pack(&mf1_packed, &mf1);
     f1_pack(&f1_packed, f1);

@@ -5,7 +5,21 @@
 #include <string.h>
 #include <immintrin.h>
 
-/* Subtract (q+1)/2, reduce modulo q and choose the centered representative. */
+/*************************************************
+* Name:        center_halfq_avx
+*
+* Description: Subtract HALF_Q from 16 packed coefficients, reduce each
+*              result modulo Q, and return its centered representative.
+*              The input register is passed by value.
+*
+* Arguments:   - __m256i a:     packed input coefficients
+*              - __m256i q:     packed copies of Q
+*              - __m256i v:     packed Barrett-reduction reciprocal
+*              - __m256i halfq: packed copies of HALF_Q
+*              - __m256i hq:    packed copies of floor(Q/2)
+*
+* Returns:     packed representatives in [-(Q-1)/2, (Q-1)/2]
+**************************************************/
 static inline __m256i center_halfq_avx(__m256i a, __m256i q,
                                        __m256i v, __m256i halfq,
                                        __m256i hq)
@@ -75,9 +89,9 @@ static int f1u64_eval_one(const poly_f1_u64 *a)
 /*************************************************
 * Name:        f1u64_translate
 *
-* Description: Apply f(X) -> f(X+1) mod (X^n+1) over F2.
-*              This is an involution (applying it twice recovers
-*              the original), so it also serves as the inverse.
+* Description: Apply the binary Taylor shift f(X) -> f(X + 1) in place.
+*              This involution changes variables between arithmetic modulo
+*              X^F1_N + 1 = (X + 1)^F1_N and arithmetic modulo X^F1_N.
 *              Implemented as a constant-time butterfly network:
 *              - s < 64:  bit-parallel shift + mask within each word
 *              - s >= 64: word-block XOR
@@ -122,12 +136,13 @@ static inline uint64_t sq2_64(uint32_t x)
 * Description: Compute a^2 in F2[X], keeping only the first trunc terms.
 *              Uses BMI2 pdep to insert a 0 after each coefficient.
 *              Processes 64-bit input words; each word expands to two
-*              output words (bits at even positions).
+*              output words (bits at even positions). The truncation length
+*              must be even, as in all current callers.
 *
 * Arguments:   - poly_f1_u64 *r:    output polynomial (mod X^trunc)
 *              - const poly_f1_u64 *a: input polynomial
 *              - int prec:           number of valid bits in a
-*              - int trunc:          number of terms to keep
+*              - int trunc:          even number of terms to keep
 **************************************************/
 static void f1u64_square_trunc(poly_f1_u64 *r, const poly_f1_u64 *a,
                                 int prec, int trunc)
@@ -235,9 +250,10 @@ static void f1u64_newton_inv(poly_f1_u64 *g, const poly_f1_u64 *fhat)
 /*************************************************
 * Name:        poly_inv_in_F2
 *
-* Description: Compute the inverse of f in F2[x]/(x^n+1).
-*              Returns 0 if f is not invertible (f1 is unchanged),
-*              returns 1 and writes the inverse into f1 if invertible.
+* Description: Fold f modulo 2 into F2[X]/(X^F1_N + 1) and compute the
+*              inverse of the folded polynomial. If it is not invertible,
+*              return 0 and leave f1 unchanged; otherwise write the inverse
+*              to f1 and return 1.
 *
 * Algorithm (corresponds to paper Algorithm 2-4):
 *   1. Coefficient folding: use repetition-code structure to fold
@@ -249,8 +265,11 @@ static void f1u64_newton_inv(poly_f1_u64 *g, const poly_f1_u64 *fhat)
 *   4. Newton iteration: compute inverse in F2[[X]]
 *   5. Inverse translate: transform back to inverse of f(X)
 *
-* Arguments:   - poly_f1 *f1: output, inverse of f (also used as scratch buffer)
-*              - const poly *f: input, original polynomial
+* Arguments:   - poly_f1 *f1: pointer to output inverse; written only on
+*                             success
+*              - const poly *f: pointer to input coefficient polynomial
+*
+* Returns:     1 if the folded polynomial is invertible, otherwise 0
 **************************************************/
 int poly_inv_in_F2(poly_f1 *f1, const poly *f)
 {
@@ -330,9 +349,10 @@ int poly_inv_in_F2(poly_f1 *f1, const poly *f)
 /*************************************************
 * Name:        f1u64_mul_ring
 *
-* Description: Multiply in F2[X]/(X^n+1).  Uses PCLMULQDQ for
+* Description: Multiply in F2[X]/(X^F1_N + 1). Uses PCLMULQDQ for
 *              64x64-bit carry-less word products with schoolbook
-*              accumulation, then folds the upper half modulo X^n+1.
+*              accumulation, then folds the upper half modulo
+*              X^F1_N + 1.
 *
 * Arguments:   - poly_f1_u64 *r:    output polynomial
 *              - const poly_f1_u64 *a: input polynomial a
@@ -366,20 +386,23 @@ static void f1u64_mul_ring(poly_f1_u64 *r,
 /*************************************************
 * Name:        poly_decode_to_msg
 *
-* Description: Decode message from ciphertext polynomial c, using the
-*              secret polynomial f1 (the inverse of f in F2).
+* Description: Decode a coefficient-domain decryption polynomial using the
+*              precomputed inverse f1. Centering is performed on register
+*              temporaries, so neither c nor f1 is modified.
 *
 * Decoding procedure (corresponds to paper Algorithm 5: Decode):
-*   1. Center ciphertext: shift reference point from (q+1)/2 to 0
+*   1. Subtract HALF_Q and reduce register-local copies of the coefficients
 *   2. Block threshold decision: use repetition-code redundancy to make
-*      D2/D4 lattice closest-vector decisions per block of N/n coefficients,
-*      recovering (f*m) in F2[X]/(X^n+1)
-*   3. Multiply by f^{-1}: compute m = (f*m) * f^{-1} in F2[X]/(X^n+1)
+*      D2 decisions for FLIT128 or D4 decisions for FLIT256/512, recovering
+*      (f*m) in F2[X]/(X^F1_N + 1)
+*   3. Multiply by f1 to recover m in F2[X]/(X^F1_N + 1)
 *   4. Extract bytes: pull message bytes from the packed bit representation
 *
-* Arguments:   - uint8_t msg[]: output message byte array
-*              - poly *c: input ciphertext polynomial (in Z_q[X]/(X^N+1))
-*              - poly_f1 *f1: inverse of f in F2[X]/(X^n+1) (precomputed)
+* Arguments:   - uint8_t msg[]: output message byte array of
+*                               KEM_MSGBYTES bytes
+*              - poly *c: pointer to input decryption polynomial; not modified
+*              - poly_f1 *f1: pointer to the precomputed inverse of the
+*                             folded secret polynomial; not modified
 **************************************************/
 void poly_decode_to_msg(uint8_t msg[KEM_MSGBYTES], poly *c, poly_f1 *f1) {
 #if REPETITIONS == 2
@@ -397,15 +420,10 @@ void poly_decode_to_msg(uint8_t msg[KEM_MSGBYTES], poly *c, poly_f1 *f1) {
      *   if |c[i]| + |c[i+256]| < (q-1)/2 = 384 -> decode as 1 (near 0)
      *   otherwise -> decode as 0 (near +/- q/2)
      *
-     * Absolute value trick: (x ^ -(x>>15)) + (x>>15)
-     *   if x >= 0: (x ^ 0) + 0 = x
-     *   if x < 0:  (x ^ -1) + 1 = ~x + 1 = -x (two's complement abs)
-     * This is faster and constant-time compared to branching.
-     *
-     * Comparison trick: (sum - threshold) >> 15
-     *   if sum < threshold -> underflow -> sign bit = 1 -> result = 1
-     *   if sum >= threshold -> non-negative -> sign bit = 0 -> result = 0
-     * Uses unsigned underflow for comparison, avoiding branches.
+     * Absolute value trick: with s = x >> 15, (x ^ s) - s equals x for
+     * nonnegative x and ~x + 1 for negative x. The strict signed comparison
+     * threshold > sum returns 1 exactly when sum < threshold; all values fit
+     * in int16_t.
      */
     {
         const __m256i threshold = _mm256_set1_epi16((int16_t)((Q - 1) / 2));
@@ -427,7 +445,7 @@ void poly_decode_to_msg(uint8_t msg[KEM_MSGBYTES], poly *c, poly_f1 *f1) {
             u1_lo = center_halfq_avx(u1_lo, q, v, halfq, hq);
             u1_hi = center_halfq_avx(u1_hi, q, v, halfq, hq);
 
-            /* abs(x) = (x ^ (x>>15)) + (x>>15) */
+            /* With s = x >> 15, abs(x) = (x ^ s) - s. */
             __m256i s0_lo = _mm256_srai_epi16(u0_lo, 15);
             __m256i s0_hi = _mm256_srai_epi16(u0_hi, 15);
             __m256i s1_lo = _mm256_srai_epi16(u1_lo, 15);
